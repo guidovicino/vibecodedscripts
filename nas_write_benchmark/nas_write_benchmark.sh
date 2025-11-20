@@ -67,8 +67,14 @@ while getopts ":s:n:i:l:d:S:h" opt; do
 done
 
 summary_only=false
-if [[ -n $summary_log && -z $size_spec && -z $max_files && -z $interval_secs && -z $log_path ]]; then
-  summary_only=true
+if [[ -n $summary_log ]]; then
+  if [[ -z $size_spec && -z $max_files && -z $interval_secs && -z $log_path ]]; then
+    summary_only=true
+  else
+    echo "Error: -S must be used alone or with no other measurement flags." >&2
+    usage
+    exit 1
+  fi
 fi
 
 if [[ $summary_only == false ]]; then
@@ -121,7 +127,7 @@ summarize_log() {
     exit 1
   fi
 
-  awk '
+  awk -v logfile="$logfile" '
   /status=/ {
     entry_count++
     status=""
@@ -147,20 +153,20 @@ summarize_log() {
   }
   END {
     if (entry_count == 0) {
-      printf "Log: %s\n", log_path
+      printf "Log: %s\n", logfile
       print "No entries found."
       exit 0
     }
     avg_duration = total_duration / entry_count
     avg_throughput = success ? total_throughput / success : 0
     total_mb = total_bytes / 1048576
-    printf "Log summary for %s\n", log_path
+    printf "Log summary for %s\n", logfile
     printf "Samples: %d (success=%d, fail=%d)\n", entry_count, success, failures
     printf "Total data written (success only): %.3f MB\n", total_mb
     printf "Total measured time: %.6f s\n", total_duration
     printf "Duration avg/min/max: %.6f / %.6f / %.6f s\n", avg_duration, min_duration, max_duration
     printf "Average throughput (success): %.2f MB/s\n", avg_throughput
-  }' log_path="$logfile" "$logfile"
+  }' "$logfile"
 }
 
 if [[ $summary_only == true ]]; then
@@ -175,11 +181,17 @@ log_measurement() {
   local message=$4
   local timestamp
   timestamp=$(date -Iseconds)
-  local duration_s
-  duration_s=$(awk -v ns="$duration_ns" 'BEGIN { printf "%.6f", ns / 1000000000 }')
-  local throughput="-"
+
+  local duration_s throughput
   if [[ $status == "OK" && $duration_ns -gt 0 ]]; then
-    throughput=$(awk -v bytes="$size_bytes" -v ns="$duration_ns" 'BEGIN { printf "%.2f", (bytes / 1048576) / (ns / 1000000000) }')
+    read -r duration_s throughput < <(
+      awk -v bytes="$size_bytes" -v ns="$duration_ns" 'BEGIN {
+        printf "%.6f\t%.2f\n", ns / 1000000000, (bytes / 1048576) / (ns / 1000000000)
+      }'
+    )
+  else
+    duration_s=$(awk -v ns="$duration_ns" 'BEGIN { printf "%.6f", ns / 1000000000 }')
+    throughput="-"
   fi
 
   {
@@ -194,7 +206,7 @@ for ((i = 1; i <= max_files; i++)); do
   filename="nas_write_test_$(date +%Y%m%d_%H%M%S)_$i"
   filepath="$target_dir/$filename"
   start_ns=$(date +%s%N)
-  if dd if=/dev/zero of="$filepath" bs="$size_spec" count=1 conv=fdatasync status=none; then
+  if dd if=/dev/zero of="$filepath" bs="$size_bytes" count=1 conv=fdatasync status=none; then
     end_ns=$(date +%s%N)
     duration_ns=$((end_ns - start_ns))
     log_measurement "OK" "$i" "$duration_ns" "file=$filepath"
@@ -213,6 +225,7 @@ for ((i = 1; i <= max_files; i++)); do
   fi
 done
 
-if [[ -n $summary_log ]]; then
-  summarize_log "$summary_log"
+if [[ $summary_only == false ]]; then
+  echo
+  summarize_log "$log_path"
 fi
